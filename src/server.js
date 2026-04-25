@@ -2,6 +2,13 @@ import express from "express";
 import { runScan } from "./crawler.js";
 
 const app = express();
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-callback-secret");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
 app.use(express.json({ limit: "2mb" }));
 
 const inFlight = new Map(); // scanId -> { status, currentUrl, pagesDone, pagesTotal }
