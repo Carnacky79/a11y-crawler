@@ -100,12 +100,16 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
         await page.goto(next, { waitUntil: "networkidle2", timeout: 15000 });
         title = await page.title().catch(() => null);
 
+        // Wait for delayed client-side scripts (e.g. accessibility plugins
+        // that apply DOM fixes after page load) before running axe-core.
+        await new Promise((r) => setTimeout(r, 4000));
+
         await page.addScriptTag({ path: axePath });
         axeRaw = await page.evaluate(async () => {
           // eslint-disable-next-line no-undef
           return await axe.run(document, {
             runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] },
-            resultTypes: ["violations"],
+            resultTypes: ["violations", "passes"],
           });
         });
 
