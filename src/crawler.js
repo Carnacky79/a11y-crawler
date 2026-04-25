@@ -132,31 +132,9 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
         const keyboardIssues = await page.evaluate(() => {
           const out = [];
 
-          // a) :focus { outline: none } without alternative
-          const focusables = Array.from(document.querySelectorAll(
-            'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
-          )).slice(0, 50);
-          let removedOutline = 0;
-          for (const el of focusables) {
-            try {
-              el.focus({ preventScroll: true });
-              const cs = getComputedStyle(el);
-              const noOutline = cs.outlineStyle === "none" || cs.outlineWidth === "0px";
-              const noBoxShadow = cs.boxShadow === "none";
-              const noBorderChange = true; // best-effort
-              if (noOutline && noBoxShadow && noBorderChange) removedOutline++;
-            } catch {}
-          }
-          if (focusables.length > 0 && removedOutline / focusables.length > 0.5) {
-            out.push({
-              id: "focus-visible-missing",
-              impact: "serious",
-              description: "Many interactive elements appear to have no visible focus indicator (outline:none without alternative). WCAG 2.4.7 Focus Visible.",
-              tags: ["wcag2aa", "wcag247", "keyboard"],
-              nodes: [{ html: "", target: ["body"] }],
-              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/focus-visible.html",
-            });
-          }
+          // NOTE: focus-visible cannot be reliably detected via getComputedStyle
+          // because :focus-visible pseudo-class state is not reflected. Removed
+          // to avoid systematic false positives. axe-core covers basic cases.
 
           // b) Positive tabindex (anti-pattern)
           const positives = document.querySelectorAll('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])');
@@ -204,7 +182,10 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
               viewWidth: window.innerWidth,
             };
           });
-          if (mobileOverflow.docWidth > mobileOverflow.viewWidth + 5) {
+          // Tolerance raised: scrollbars, off-canvas menus, and fixed-width
+          // ads/embeds commonly cause minor overflow that is not a real
+          // WCAG 1.4.10 violation. Only flag when overflow exceeds 50px.
+          if (mobileOverflow.docWidth > mobileOverflow.viewWidth + 50) {
             reflowIssues.push({
               id: "reflow-mobile-overflow",
               impact: "serious",
