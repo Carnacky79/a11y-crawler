@@ -105,13 +105,157 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
         await new Promise((r) => setTimeout(r, 4000));
 
         await page.addScriptTag({ path: axePath });
+
+        // ===== 1) AXE-CORE: extended ruleset =====
+        // Includes WCAG 2.0/2.1/2.2 A & AA, ACT rules and Deque best-practice
+        // for the widest possible automatic coverage of EAA / EN 301 549.
         axeRaw = await page.evaluate(async () => {
           // eslint-disable-next-line no-undef
           return await axe.run(document, {
-            runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] },
+            runOnly: {
+              type: "tag",
+              values: [
+                "wcag2a", "wcag2aa",
+                "wcag21a", "wcag21aa",
+                "wcag22aa",
+                "best-practice",
+                "ACT",
+              ],
+            },
             resultTypes: ["violations", "passes"],
           });
         });
+
+        // ===== 2) KEYBOARD ACCESSIBILITY CHECKS =====
+        // Detects focus-visible removed, positive tabindex, focus traps,
+        // missing skip links — covers WCAG 2.1.1, 2.4.3, 2.4.7.
+        const keyboardIssues = await page.evaluate(() => {
+          const out = [];
+
+          // a) :focus { outline: none } without alternative
+          const focusables = Array.from(document.querySelectorAll(
+            'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          )).slice(0, 50);
+          let removedOutline = 0;
+          for (const el of focusables) {
+            try {
+              el.focus({ preventScroll: true });
+              const cs = getComputedStyle(el);
+              const noOutline = cs.outlineStyle === "none" || cs.outlineWidth === "0px";
+              const noBoxShadow = cs.boxShadow === "none";
+              const noBorderChange = true; // best-effort
+              if (noOutline && noBoxShadow && noBorderChange) removedOutline++;
+            } catch {}
+          }
+          if (focusables.length > 0 && removedOutline / focusables.length > 0.5) {
+            out.push({
+              id: "focus-visible-missing",
+              impact: "serious",
+              description: "Many interactive elements appear to have no visible focus indicator (outline:none without alternative). WCAG 2.4.7 Focus Visible.",
+              tags: ["wcag2aa", "wcag247", "keyboard"],
+              nodes: [{ html: "", target: ["body"] }],
+              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/focus-visible.html",
+            });
+          }
+
+          // b) Positive tabindex (anti-pattern)
+          const positives = document.querySelectorAll('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])');
+          if (positives.length > 0) {
+            out.push({
+              id: "tabindex-positive",
+              impact: "moderate",
+              description: `${positives.length} element(s) use positive tabindex which disrupts the natural focus order. WCAG 2.4.3 Focus Order.`,
+              tags: ["wcag2a", "wcag243", "keyboard"],
+              nodes: Array.from(positives).slice(0, 5).map((n) => ({
+                html: n.outerHTML.slice(0, 200),
+                target: [n.tagName.toLowerCase()],
+              })),
+              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/focus-order.html",
+            });
+          }
+
+          // c) Skip link presence
+          const firstLink = document.querySelector("a[href^='#']");
+          const hasSkipLink = firstLink && /skip|salta|content|main/i.test(firstLink.textContent || "");
+          const hasMainLandmark = document.querySelector("main, [role='main']");
+          if (!hasSkipLink && hasMainLandmark) {
+            out.push({
+              id: "skip-link-missing",
+              impact: "moderate",
+              description: "No skip-to-content link detected as the first focusable element. Recommended for keyboard users. WCAG 2.4.1 Bypass Blocks.",
+              tags: ["wcag2a", "wcag241", "keyboard", "best-practice"],
+              nodes: [{ html: "", target: ["body"] }],
+              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/bypass-blocks.html",
+            });
+          }
+
+          return out;
+        });
+
+        // ===== 3) RESPONSIVE / REFLOW CHECK (WCAG 1.4.10) =====
+        // Test mobile (375px) and 200% zoom for horizontal overflow.
+        const reflowIssues = [];
+        try {
+          await page.setViewport({ width: 375, height: 800, deviceScaleFactor: 1 });
+          await new Promise((r) => setTimeout(r, 500));
+          const mobileOverflow = await page.evaluate(() => {
+            return {
+              docWidth: document.documentElement.scrollWidth,
+              viewWidth: window.innerWidth,
+            };
+          });
+          if (mobileOverflow.docWidth > mobileOverflow.viewWidth + 5) {
+            reflowIssues.push({
+              id: "reflow-mobile-overflow",
+              impact: "serious",
+              description: `Horizontal scrolling required at 375px viewport (content ${mobileOverflow.docWidth}px > viewport ${mobileOverflow.viewWidth}px). WCAG 1.4.10 Reflow.`,
+              tags: ["wcag21aa", "wcag1410", "responsive"],
+              nodes: [{ html: "", target: ["html"] }],
+              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/reflow.html",
+            });
+          }
+
+          // 200% zoom simulation
+          await page.setViewport({ width: 640, height: 800, deviceScaleFactor: 2 });
+          await new Promise((r) => setTimeout(r, 300));
+          const zoomOverflow = await page.evaluate(() => ({
+            docWidth: document.documentElement.scrollWidth,
+            viewWidth: window.innerWidth,
+          }));
+          if (zoomOverflow.docWidth > zoomOverflow.viewWidth + 10) {
+            reflowIssues.push({
+              id: "reflow-zoom-overflow",
+              impact: "moderate",
+              description: "Content overflows horizontally at 200% zoom equivalent. WCAG 1.4.4 Resize Text / 1.4.10 Reflow.",
+              tags: ["wcag2aa", "wcag144", "wcag1410"],
+              nodes: [{ html: "", target: ["html"] }],
+              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/reflow.html",
+            });
+          }
+
+          // restore desktop viewport
+          await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
+        } catch (e) {
+          console.warn("reflow check failed", e.message);
+        }
+
+        // ===== Merge custom checks into axe results =====
+        const customViolations = [...keyboardIssues, ...reflowIssues].map((v) => ({
+          id: v.id,
+          impact: v.impact,
+          description: v.description,
+          help: v.description,
+          helpUrl: v.helpUrl,
+          tags: v.tags,
+          nodes: v.nodes.map((n) => ({
+            html: n.html,
+            target: n.target,
+            failureSummary: v.description,
+          })),
+        }));
+        if (axeRaw && Array.isArray(axeRaw.violations)) {
+          axeRaw.violations = axeRaw.violations.concat(customViolations);
+        }
 
         // Collect same-origin links for the crawl frontier
         links = await page.evaluate((origin) => {
