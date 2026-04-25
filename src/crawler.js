@@ -23,6 +23,34 @@ function normalize(u) {
   }
 }
 
+// WordPress system paths/patterns to ignore when wordpressMode is enabled.
+const WP_PATH_PATTERNS = [
+  /\/wp-admin(\/|$)/i,
+  /\/wp-login\.php/i,
+  /\/wp-json(\/|$)/i,
+  /\/wp-content\/uploads\//i,
+  /\/wp-includes(\/|$)/i,
+  /\/xmlrpc\.php/i,
+  /\/feed\/?$/i,
+  /\/comments\/feed/i,
+  /\/trackback\/?$/i,
+  /\/author\//i,
+  /\/tag\//i,
+  /\/category\//i,
+  /\/page\/\d+/i,
+  /\/\?(p|page_id|preview|replytocom|attachment_id)=/i,
+];
+
+function isWordPressSystemUrl(u) {
+  try {
+    const url = new URL(u);
+    const full = url.pathname + url.search;
+    return WP_PATH_PATTERNS.some((re) => re.test(full));
+  } catch {
+    return false;
+  }
+}
+
 async function postCallback(callbackUrl, callbackSecret, body) {
   try {
     const r = await fetch(callbackUrl, {
@@ -36,7 +64,7 @@ async function postCallback(callbackUrl, callbackSecret, body) {
   }
 }
 
-export async function runScan({ scanId, url, maxPages, respectRobots, callbackUrl, callbackSecret, onUpdate }) {
+export async function runScan({ scanId, url, maxPages, respectRobots, wordpressMode, callbackUrl, callbackSecret, onUpdate }) {
   const rootU = new URL(url);
   const origin = rootU.origin;
 
@@ -108,10 +136,13 @@ export async function runScan({ scanId, url, maxPages, respectRobots, callbackUr
       // Enqueue new same-origin links
       for (const l of links) {
         const n = normalize(l);
-        if (n && !seen.has(n) && n.startsWith(origin)) {
+        if (!n || seen.has(n) || !n.startsWith(origin)) continue;
+        if (wordpressMode && isWordPressSystemUrl(n)) {
           seen.add(n);
-          if (seen.size <= maxPages) queue.push(n);
+          continue;
         }
+        seen.add(n);
+        if (seen.size <= maxPages) queue.push(n);
       }
     }
 

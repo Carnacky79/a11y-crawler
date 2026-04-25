@@ -22,7 +22,7 @@ app.get("/scan/:id", (req, res) => {
 });
 
 app.post("/scan", async (req, res) => {
-  const { scanId, url, maxPages = 100, respectRobots = false, callbackUrl, callbackSecret } = req.body ?? {};
+  const { scanId, url, maxPages = 100, respectRobots = false, wordpressMode = false, callbackUrl, callbackSecret } = req.body ?? {};
   if (!scanId || !url || !callbackUrl) {
     return res.status(400).json({ error: "scanId, url and callbackUrl are required" });
   }
@@ -31,7 +31,7 @@ app.post("/scan", async (req, res) => {
   inFlight.set(scanId, { status: "starting", currentUrl: null, pagesDone: 0, pagesTotal: null });
 
   runScan({
-    scanId, url, maxPages, respectRobots, callbackUrl, callbackSecret,
+    scanId, url, maxPages, respectRobots, wordpressMode, callbackUrl, callbackSecret,
     onUpdate: (patch) => inFlight.set(scanId, { ...(inFlight.get(scanId) ?? {}), ...patch }),
   }).catch((err) => {
     console.error("scan failed", scanId, err);
