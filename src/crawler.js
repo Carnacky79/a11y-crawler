@@ -257,6 +257,90 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
           axeRaw.violations = axeRaw.violations.concat(customViolations);
         }
 
+        // ===== 4) AI SEMANTIC CHECKS (alt, heading, label, language) =====
+        try {
+          const semanticData = await page.evaluate(() => {
+            const altTexts = Array.from(document.querySelectorAll("img[alt]"))
+              .filter((img) => img.getAttribute("alt").trim().length > 0)
+              .slice(0, 30)
+              .map((img) => ({
+                src: img.getAttribute("src") || "",
+                alt: img.getAttribute("alt") || "",
+              }));
+
+            const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))
+              .slice(0, 40)
+              .map((h) => ({
+                level: parseInt(h.tagName.substring(1), 10),
+                text: (h.textContent || "").trim().slice(0, 200),
+              }))
+              .filter((h) => h.text.length > 0);
+
+            const formLabels = [];
+            for (const f of document.querySelectorAll("input,select,textarea")) {
+              const type = f.tagName === "INPUT" ? (f.getAttribute("type") || "text") : f.tagName.toLowerCase();
+              if (type === "hidden" || type === "submit" || type === "button") continue;
+              const name = f.getAttribute("name") || f.getAttribute("id") || "";
+              let label = "";
+              const aria = f.getAttribute("aria-label");
+              if (aria) label = aria;
+              else if (f.id) {
+                const lbl = document.querySelector(`label[for="${f.id}"]`);
+                if (lbl) label = (lbl.textContent || "").trim();
+              }
+              if (!label) {
+                const parentLabel = f.closest("label");
+                if (parentLabel) label = (parentLabel.textContent || "").trim();
+              }
+              formLabels.push({
+                type, name, label: label.slice(0, 120),
+                placeholder: f.getAttribute("placeholder") || "",
+              });
+              if (formLabels.length >= 20) break;
+            }
+
+            // Plain text sample from main content
+            const main = document.querySelector("main, [role='main'], article") || document.body;
+            const text = (main.textContent || "").replace(/\s+/g, " ").trim().slice(0, 2000);
+
+            return { altTexts, headings, formLabels, textSample: text };
+          });
+
+          // Derive AI endpoint from callbackUrl base
+          const base = callbackUrl.replace(/\/functions\/v1\/scan-callback\/?$/, "");
+          const aiUrl = `${base}/functions/v1/analyze-with-ai`;
+
+          const aiRes = await fetch(aiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: next, ...semanticData }),
+          });
+
+          if (aiRes.ok) {
+            const aiData = await aiRes.json();
+            const aiViolations = (aiData?.violations ?? []).map((v) => ({
+              id: v.id,
+              impact: v.impact,
+              description: v.description,
+              help: v.description,
+              helpUrl: v.help_url,
+              tags: v.wcag_tags,
+              nodes: [{
+                html: v.html_snippet || "",
+                target: [v.selector || "body"],
+                failureSummary: v.description,
+              }],
+            }));
+            if (axeRaw && Array.isArray(axeRaw.violations) && aiViolations.length > 0) {
+              axeRaw.violations = axeRaw.violations.concat(aiViolations);
+            }
+          } else {
+            console.warn("AI analysis non-ok", aiRes.status);
+          }
+        } catch (e) {
+          console.warn("AI semantic check failed", e.message);
+        }
+
         // Collect same-origin links for the crawl frontier
         links = await page.evaluate((origin) => {
           const set = new Set();
