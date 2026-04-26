@@ -41,11 +41,21 @@ const WP_PATH_PATTERNS = [
   /\/\?(p|page_id|preview|replytocom|attachment_id)=/i,
 ];
 
+// Common demo / theme leftover paths that typically return 404 on production
+// WordPress installs (e.g. theme demo content not imported).
+const WP_DEMO_PATTERNS = [
+  /\/wp\//i,            // /wp/<theme>/...
+  /\/wotech(\/|$)/i,    // demo theme namespace
+  /\/demo(\/|$)/i,
+  /\/sample-page/i,
+];
+
 function isWordPressSystemUrl(u) {
   try {
     const url = new URL(u);
     const full = url.pathname + url.search;
-    return WP_PATH_PATTERNS.some((re) => re.test(full));
+    return WP_PATH_PATTERNS.some((re) => re.test(full))
+      || WP_DEMO_PATTERNS.some((re) => re.test(full));
   } catch {
     return false;
   }
@@ -97,7 +107,20 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
       try {
         await page.setUserAgent("A11yMonitorBot/1.0 (+https://a11y-monitor.local)");
         await page.setViewport({ width: 1280, height: 800 });
-        await page.goto(next, { waitUntil: "networkidle2", timeout: 15000 });
+        const resp = await page.goto(next, { waitUntil: "networkidle2", timeout: 15000 });
+        const httpStatus = resp?.status?.() ?? 0;
+        // Skip 4xx/5xx pages: they are not real content and pollute the report
+        // (e.g. WordPress demo theme leftover URLs returning 404).
+        if (httpStatus >= 400) {
+          pageStatus = "skipped";
+          console.warn("skip non-200", next, httpStatus);
+          await page.close().catch(() => {});
+          await postCallback(callbackUrl, callbackSecret, {
+            type: "page", scanId, url: next, title: null, status: pageStatus, axeRaw: null,
+          });
+          scanned++;
+          continue;
+        }
         title = await page.title().catch(() => null);
 
         // Wait for delayed client-side scripts (e.g. accessibility plugins
@@ -107,8 +130,12 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
         await page.addScriptTag({ path: axePath });
 
         // ===== 1) AXE-CORE: extended ruleset =====
-        // Includes WCAG 2.0/2.1/2.2 A & AA, ACT rules and Deque best-practice
-        // for the widest possible automatic coverage of EAA / EN 301 549.
+        // Strictly WCAG 2.0/2.1/2.2 Level A & AA — the legal scope of the
+        // European Accessibility Act / EN 301 549. We deliberately exclude:
+        //  - "best-practice": noisy `region` rule and similar non-normative checks
+        //  - "ACT": overlap with WCAG rules, often redundant
+        //  - "wcag2aaa" / "wcag21aaa" / "wcag22aaa": AAA is out of EAA scope
+        //    (e.g. color-contrast-enhanced is AAA).
         axeRaw = await page.evaluate(async () => {
           // eslint-disable-next-line no-undef
           return await axe.run(document, {
@@ -118,8 +145,6 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
                 "wcag2a", "wcag2aa",
                 "wcag21a", "wcag21aa",
                 "wcag22aa",
-                "best-practice",
-                "ACT",
               ],
             },
             resultTypes: ["violations", "passes"],
@@ -152,20 +177,10 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
             });
           }
 
-          // c) Skip link presence
-          const firstLink = document.querySelector("a[href^='#']");
-          const hasSkipLink = firstLink && /skip|salta|content|main/i.test(firstLink.textContent || "");
-          const hasMainLandmark = document.querySelector("main, [role='main']");
-          if (!hasSkipLink && hasMainLandmark) {
-            out.push({
-              id: "skip-link-missing",
-              impact: "moderate",
-              description: "No skip-to-content link detected as the first focusable element. Recommended for keyboard users. WCAG 2.4.1 Bypass Blocks.",
-              tags: ["wcag2a", "wcag241", "keyboard", "best-practice"],
-              nodes: [{ html: "", target: ["body"] }],
-              helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/bypass-blocks.html",
-            });
-          }
+          // NOTE: skip-link detection removed. Heuristics based on first
+          // anchor + text matching produced systematic false positives on
+          // sites that DO have a skip link rendered after a hidden landmark
+          // or via JS. axe-core's `bypass` rule already covers WCAG 2.4.1.
 
           return out;
         });
