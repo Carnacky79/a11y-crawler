@@ -151,6 +151,61 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
           });
         });
 
+        // ===== POST-PROCESS: filter false-positive nested-interactive =====
+        // axe-core flags nested-interactive on raw DOM markup even when the
+        // nested interactive descendants are effectively removed from the
+        // accessibility tree via aria-hidden="true" + tabindex="-1" or
+        // the `inert` attribute. We re-evaluate each flagged node and drop
+        // it if all interactive descendants are AT-hidden.
+        try {
+          if (axeRaw && Array.isArray(axeRaw.violations)) {
+            const niIdx = axeRaw.violations.findIndex((v) => v.id === "nested-interactive");
+            if (niIdx !== -1) {
+              const ni = axeRaw.violations[niIdx];
+              const targets = ni.nodes.map((n) => Array.isArray(n.target) ? n.target[0] : n.target);
+              const keepFlags = await page.evaluate((sels) => {
+                const INTERACTIVE = "a[href],button,input,select,textarea,[role='button'],[role='link'],[role='checkbox'],[role='radio'],[role='menuitem'],[role='tab'],[tabindex]:not([tabindex='-1'])";
+                function isATHidden(el) {
+                  let cur = el;
+                  while (cur && cur !== document.body) {
+                    if (cur.getAttribute && cur.getAttribute("aria-hidden") === "true") return true;
+                    if (cur.hasAttribute && cur.hasAttribute("inert")) return true;
+                    cur = cur.parentElement;
+                  }
+                  return false;
+                }
+                return sels.map((sel) => {
+                  try {
+                    const el = document.querySelector(sel);
+                    if (!el) return true; // keep if we can't resolve
+                    const inner = el.querySelectorAll(INTERACTIVE);
+                    if (inner.length === 0) return true;
+                    // keep (= real violation) only if at least one nested
+                    // interactive descendant is NOT AT-hidden / inert
+                    for (const child of inner) {
+                      if (child === el) continue;
+                      const tabindex = child.getAttribute("tabindex");
+                      const ariaHidden = isATHidden(child);
+                      if (!ariaHidden && tabindex !== "-1") return true;
+                    }
+                    return false; // all nested interactives are AT-hidden → drop
+                  } catch {
+                    return true;
+                  }
+                });
+              }, targets);
+              const filteredNodes = ni.nodes.filter((_, i) => keepFlags[i]);
+              if (filteredNodes.length === 0) {
+                axeRaw.violations.splice(niIdx, 1);
+              } else {
+                ni.nodes = filteredNodes;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("nested-interactive post-filter failed", e.message);
+        }
+
         // ===== 2) KEYBOARD ACCESSIBILITY CHECKS =====
         // Detects focus-visible removed, positive tabindex, focus traps,
         // missing skip links — covers WCAG 2.1.1, 2.4.3, 2.4.7.
