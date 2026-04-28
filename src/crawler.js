@@ -151,6 +151,34 @@ export async function runScan({ scanId, url, maxPages, respectRobots, wordpressM
           });
         });
 
+        // ===== 1-bis) AXE-CORE: best-practice (advisory only) =====
+        // Eseguiamo una seconda passata sulle regole categorizzate da axe come
+        // "best-practice" (es. region, heading-order, landmark-one-main,
+        // page-has-heading-one, scrollable-region-focusable). Queste NON sono
+        // mappate su Success Criteria WCAG livello A/AA, quindi non costituiscono
+        // non conformità ai fini EAA / EN 301 549. Le marchiamo con prefisso
+        // "bp-" sul rule_id così la UI/export possono mostrarle separatamente
+        // ed escluderle dai conteggi di conformità.
+        try {
+          const bpRaw = await page.evaluate(async () => {
+            // eslint-disable-next-line no-undef
+            return await axe.run(document, {
+              runOnly: { type: "tag", values: ["best-practice"] },
+              resultTypes: ["violations"],
+            });
+          });
+          if (bpRaw && Array.isArray(bpRaw.violations) && axeRaw && Array.isArray(axeRaw.violations)) {
+            const tagged = bpRaw.violations.map((v) => ({
+              ...v,
+              id: `bp-${v.id}`,
+              tags: Array.isArray(v.tags) ? [...v.tags, "best-practice"] : ["best-practice"],
+            }));
+            axeRaw.violations = axeRaw.violations.concat(tagged);
+          }
+        } catch (e) {
+          console.warn("best-practice pass failed", e.message);
+        }
+
         // ===== POST-PROCESS: filter false-positive nested-interactive =====
         // axe-core flags nested-interactive on raw DOM markup even when the
         // nested interactive descendants are effectively removed from the
